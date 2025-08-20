@@ -12,6 +12,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@solana/web3.js": "^1.87.6"
+    "@solana/web3.js": "^1.87.6",
+    "@solana/spl-token": "^0.4.1",
+    "@solana/spl-associated-token-account": "^2.3.0",
+    "solana-bankrun": "^0.3.0",
+    "bn.js": "^5.2.1"
   }
 }

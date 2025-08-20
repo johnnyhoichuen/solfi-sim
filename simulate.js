@@ -1,11 +1,19 @@
 import { 
-    Connection, 
     Keypair, 
     PublicKey, 
     Transaction, 
     TransactionInstruction,
-    LAMPORTS_PER_SOL 
+    LAMPORTS_PER_SOL,
+    SystemProgram
 } from '@solana/web3.js';
+import { 
+    createAssociatedTokenAccountIdempotentInstruction,
+    createSyncNativeInstruction,
+    getAssociatedTokenAddressSync,
+    TOKEN_PROGRAM_ID,
+    ACCOUNT_SIZE
+} from '@solana/spl-token';
+import { startAnchor } from 'solana-bankrun';
 import { 
     SOLFI_PROGRAM, 
     WSOL, 
@@ -14,9 +22,10 @@ import {
     DEFAULT_SWAP_AMOUNT_SOL, 
     DEFAULT_SWAP_AMOUNT_USDC, 
     SOL_DECIMALS, 
-    USDC_DECIMALS,
-    DEFAULT_RPC_URL 
+    USDC_DECIMALS 
 } from './constants.js';
+import fs from 'fs';
+import path from 'path';
 
 // SwapDirection enum equivalent
 export const SwapDirection = {
@@ -43,22 +52,16 @@ function createInstructionData(direction, amountIn) {
     return buffer;
 }
 
-// Get associated token address (simplified version)
-function getAssociatedTokenAddress(mint, owner) {
-    // This is a simplified version - in production you'd use @solana/spl-token
-    // For simulation purposes, we'll generate a deterministic address
-    const seeds = [
-        owner.toBuffer(),
-        Buffer.from([0x06, 0xdd, 0xf6, 0xe1, 0xd7, 0x65, 0xa1, 0x93, 0xd9, 0xcb, 0xe1, 0x46, 0xce, 0xeb, 0x79, 0xac, 0x1c, 0xb4, 0x85, 0xed, 0x5f, 0x5b, 0x37, 0x91, 0x3a, 0x8c, 0xf5, 0x85, 0x7e, 0xff, 0x00, 0xa9]), // TOKEN_PROGRAM_ID
-        mint.toBuffer()
-    ];
-    
-    // Simple hash-based deterministic address generation
-    const hash = require('crypto').createHash('sha256');
-    seeds.forEach(seed => hash.update(seed));
-    const hashBuffer = hash.digest();
-    
-    return new PublicKey(hashBuffer.slice(0, 32));
+// Create token account with balance
+function createTokenAccount(mint, owner, amount) {
+    const rentExemptBalance = 2039280; // Rent exempt balance for token account
+    return {
+        lamports: rentExemptBalance,
+        data: Buffer.alloc(ACCOUNT_SIZE), // Token account data will be properly initialized
+        owner: TOKEN_PROGRAM_ID,
+        executable: false,
+        rentEpoch: 0
+    };
 }
 
 // Create swap instruction
@@ -66,12 +69,12 @@ function createSwapInstruction(direction, market, user, tokenA, tokenB, amount) 
     const accounts = [
         { pubkey: user, isSigner: true, isWritable: true },
         { pubkey: market, isSigner: false, isWritable: true },
-        { pubkey: getAssociatedTokenAddress(tokenA, market), isSigner: false, isWritable: true },
-        { pubkey: getAssociatedTokenAddress(tokenB, market), isSigner: false, isWritable: true },
-        { pubkey: getAssociatedTokenAddress(tokenA, user), isSigner: false, isWritable: true },
-        { pubkey: getAssociatedTokenAddress(tokenB, user), isSigner: false, isWritable: true },
-        { pubkey: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), isSigner: false, isWritable: false }, // SPL Token Program
-        { pubkey: new PublicKey("Sysvar1nstructions1111111111111111111111111"), isSigner: false, isWritable: false }, // Sysvar Instructions
+        { pubkey: getAssociatedTokenAddressSync(tokenA, market), isSigner: false, isWritable: true },
+        { pubkey: getAssociatedTokenAddressSync(tokenB, market), isSigner: false, isWritable: true },
+        { pubkey: getAssociatedTokenAddressSync(tokenA, user), isSigner: false, isWritable: true },
+        { pubkey: getAssociatedTokenAddressSync(tokenB, user), isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: new PublicKey("Sysvar1nstructions1111111111111111111111111"), isSigner: false, isWritable: false },
     ];
 
     return new TransactionInstruction({
@@ -81,30 +84,87 @@ function createSwapInstruction(direction, market, user, tokenA, tokenB, amount) 
     });
 }
 
-// Simulate token balance (mock implementation)
-function getTokenBalance(connection, tokenAccount) {
-    // In a real implementation, this would query the blockchain
-    // For simulation, we'll return a mock value
-    return Math.floor(Math.random() * 1000000000); // Random balance for simulation
+// Get token balance from bankrun context
+async function getTokenBalance(context, tokenAccount) {
+    try {
+        const accountInfo = await context.banksClient.getAccount(tokenAccount);
+        if (!accountInfo) return 0;
+        
+        // Parse token account data to get balance
+        const data = accountInfo.data;
+        if (data.length >= 64) {
+            // Token amount is stored at offset 64 as u64 little endian
+            return data.readBigUInt64LE(64);
+        }
+        return 0n;
+    } catch (error) {
+        return 0n;
+    }
 }
 
-// Main simulate function - Node.js version of the Rust simulate function
+// Load account data from JSON files (equivalent to AccountWithAddress::read_all())
+async function loadAccountData() {
+    const accounts = [];
+    const dataDir = path.join(process.cwd(), 'data');
+    
+    if (!fs.existsSync(dataDir)) {
+        return accounts;
+    }
+
+    const files = fs.readdirSync(dataDir);
+    for (const file of files) {
+        if (file.startsWith('account_') && file.endsWith('.json')) {
+            try {
+                const filePath = path.join(dataDir, file);
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                accounts.push({
+                    address: new PublicKey(data.address),
+                    account: data.account
+                });
+            } catch (error) {
+                console.warn(`Failed to load account from ${file}:`, error.message);
+            }
+        }
+    }
+    
+    return accounts;
+}
+
+// Main simulate function - Node.js version using bankrun SVM
 export async function simulate(
     direction = SwapDirection.SOL_TO_USDC,
     amount = null,
     slot = null,
     ignoreErrors = false,
-    print = false,
-    rpcUrl = DEFAULT_RPC_URL
+    print = false
 ) {
     try {
-        // Create connection (equivalent to LiteSVM setup)
-        const connection = new Connection(rpcUrl, 'confirmed');
+        // Start bankrun context (equivalent to LiteSVM setup)
+        const context = await startAnchor("", [], []);
         
+        // Load SolFi program
+        const programPath = path.join(process.cwd(), 'data', 'solfi.so');
+        if (fs.existsSync(programPath)) {
+            const programData = fs.readFileSync(programPath);
+            await context.banksClient.setAccount(SOLFI_PROGRAM, {
+                lamports: 1000000000,
+                data: programData,
+                owner: new PublicKey("BPFLoader2111111111111111111111111111111111"),
+                executable: true,
+                rentEpoch: 0
+            });
+        }
+
+        // Load all account data
+        const accountData = await loadAccountData();
+        for (const { address, account } of accountData) {
+            await context.banksClient.setAccount(address, account);
+        }
+
         // Generate user keypair
         const userKeypair = Keypair.generate();
         const user = userKeypair.publicKey;
-        
+
         // Determine swap parameters based on direction
         const { toMint, fromDecimals, toDecimals, inAmountUi } = 
             direction === SwapDirection.SOL_TO_USDC 
@@ -122,32 +182,83 @@ export async function simulate(
                 };
 
         const amountInAtomic = Math.floor(inAmountUi * Math.pow(10, fromDecimals));
+        const totalAmountNeeded = amountInAtomic * SOLFI_MARKETS.length;
+        const feeLamports = LAMPORTS_PER_SOL; // 1 SOL for fees
+
+        // Setup user account with required funds
+        if (direction === SwapDirection.SOL_TO_USDC) {
+            const airdropAmount = totalAmountNeeded + feeLamports;
+            await context.banksClient.setAccount(user, {
+                lamports: airdropAmount,
+                data: Buffer.alloc(0),
+                owner: SystemProgram.programId,
+                executable: false,
+                rentEpoch: 0
+            });
+        } else {
+            // For USDC to SOL, give user SOL for fees and USDC for swaps
+            await context.banksClient.setAccount(user, {
+                lamports: feeLamports,
+                data: Buffer.alloc(0),
+                owner: SystemProgram.programId,
+                executable: false,
+                rentEpoch: 0
+            });
+
+            // Create USDC token account with balance
+            const usdcAta = getAssociatedTokenAddressSync(USDC, user);
+            const usdcAccount = createTokenAccount(USDC, user, totalAmountNeeded);
+            await context.banksClient.setAccount(usdcAta, usdcAccount);
+        }
+
         const results = [];
 
         // Simulate swaps across all markets
         for (const market of SOLFI_MARKETS) {
             try {
-                const toAta = getAssociatedTokenAddress(toMint, user);
-                const balanceBefore = getTokenBalance(connection, toAta);
+                const toAta = getAssociatedTokenAddressSync(toMint, user);
+                const balanceBefore = await getTokenBalance(context, toAta);
 
-                // Create swap instruction
-                const swapIx = createSwapInstruction(
-                    direction,
-                    market,
-                    user,
-                    WSOL,
-                    USDC,
-                    amountInAtomic
-                );
+                // Create transaction instructions
+                const instructions = [
+                    createAssociatedTokenAccountIdempotentInstruction(
+                        user, user, WSOL, TOKEN_PROGRAM_ID
+                    ),
+                    createAssociatedTokenAccountIdempotentInstruction(
+                        user, user, USDC, TOKEN_PROGRAM_ID
+                    )
+                ];
 
-                // In a real implementation, you would:
-                // 1. Create and send the transaction
-                // 2. Wait for confirmation
-                // 3. Get the actual balance after
-                
-                // For this minimal simulation, we'll calculate a mock output
-                const balanceAfter = balanceBefore + Math.floor(Math.random() * 1000000);
-                const outAmountAtomic = balanceAfter - balanceBefore;
+                // Add SOL wrapping instructions for SOL to USDC swaps
+                if (direction === SwapDirection.SOL_TO_USDC) {
+                    const wsolAta = getAssociatedTokenAddressSync(WSOL, user);
+                    instructions.push(
+                        SystemProgram.transfer({
+                            fromPubkey: user,
+                            toPubkey: wsolAta,
+                            lamports: amountInAtomic
+                        }),
+                        createSyncNativeInstruction(wsolAta, TOKEN_PROGRAM_ID)
+                    );
+                }
+
+                // Add the swap instruction
+                instructions.push(createSwapInstruction(
+                    direction, market, user, WSOL, USDC, amountInAtomic
+                ));
+
+                // Create and send transaction
+                const transaction = new Transaction().add(...instructions);
+                transaction.recentBlockhash = context.lastBlockhash;
+                transaction.feePayer = user;
+                transaction.sign(userKeypair);
+
+                // Simulate transaction execution
+                await context.banksClient.processTransaction(transaction);
+
+                // Get balance after transaction
+                const balanceAfter = await getTokenBalance(context, toAta);
+                const outAmountAtomic = Number(balanceAfter - balanceBefore);
                 const outAmountUi = outAmountAtomic / Math.pow(10, toDecimals);
 
                 const swapResult = new SwapResult(
