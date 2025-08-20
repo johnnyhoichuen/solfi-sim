@@ -1,0 +1,17 @@
+{
+  "name": "solfi-sim-nodejs",
+  "version": "1.0.0",
+  "description": "Minimal Node.js version of SolFi simulator",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "simulate": "node simulate.js"
+  },
+  "keywords": ["solana", "defi", "simulation", "solfi"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.87.6"
+  }
+}
