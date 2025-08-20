@@ -13,7 +13,7 @@ import {
     TOKEN_PROGRAM_ID,
     ACCOUNT_SIZE
 } from '@solana/spl-token';
-import { startAnchor } from 'solana-bankrun';
+import { LiteSVM } from 'litesvm';
 import { 
     SOLFI_PROGRAM, 
     WSOL, 
@@ -84,11 +84,11 @@ function createSwapInstruction(direction, market, user, tokenA, tokenB, amount) 
     });
 }
 
-// Get token balance from bankrun context
-async function getTokenBalance(context, tokenAccount) {
+// Get token balance from LiteSVM
+function getTokenBalance(svm, tokenAccount) {
     try {
-        const accountInfo = await context.banksClient.getAccount(tokenAccount);
-        if (!accountInfo) return 0;
+        const accountInfo = svm.getAccount(tokenAccount);
+        if (!accountInfo) return 0n;
         
         // Parse token account data to get balance
         const data = accountInfo.data;
@@ -130,7 +130,7 @@ async function loadAccountData() {
     return accounts;
 }
 
-// Main simulate function - Node.js version using bankrun SVM
+// Main simulate function - Node.js version using LiteSVM
 export async function simulate(
     direction = SwapDirection.SOL_TO_USDC,
     amount = null,
@@ -139,26 +139,25 @@ export async function simulate(
     print = false
 ) {
     try {
-        // Start bankrun context (equivalent to LiteSVM setup)
-        const context = await startAnchor("", [], []);
+        // Create LiteSVM instance (equivalent to Rust LiteSVM setup)
+        const svm = new LiteSVM();
         
         // Load SolFi program
         const programPath = path.join(process.cwd(), 'data', 'solfi.so');
         if (fs.existsSync(programPath)) {
             const programData = fs.readFileSync(programPath);
-            await context.banksClient.setAccount(SOLFI_PROGRAM, {
-                lamports: 1000000000,
-                data: programData,
-                owner: new PublicKey("BPFLoader2111111111111111111111111111111111"),
-                executable: true,
-                rentEpoch: 0
-            });
+            svm.addProgram(SOLFI_PROGRAM, programData);
         }
 
         // Load all account data
         const accountData = await loadAccountData();
         for (const { address, account } of accountData) {
-            await context.banksClient.setAccount(address, account);
+            svm.setAccount(address, account);
+        }
+        
+        // Set slot if provided
+        if (slot) {
+            svm.warpToSlot(slot);
         }
 
         // Generate user keypair
@@ -188,27 +187,15 @@ export async function simulate(
         // Setup user account with required funds
         if (direction === SwapDirection.SOL_TO_USDC) {
             const airdropAmount = totalAmountNeeded + feeLamports;
-            await context.banksClient.setAccount(user, {
-                lamports: airdropAmount,
-                data: Buffer.alloc(0),
-                owner: SystemProgram.programId,
-                executable: false,
-                rentEpoch: 0
-            });
+            svm.airdrop(user, airdropAmount);
         } else {
             // For USDC to SOL, give user SOL for fees and USDC for swaps
-            await context.banksClient.setAccount(user, {
-                lamports: feeLamports,
-                data: Buffer.alloc(0),
-                owner: SystemProgram.programId,
-                executable: false,
-                rentEpoch: 0
-            });
+            svm.airdrop(user, feeLamports);
 
             // Create USDC token account with balance
             const usdcAta = getAssociatedTokenAddressSync(USDC, user);
             const usdcAccount = createTokenAccount(USDC, user, totalAmountNeeded);
-            await context.banksClient.setAccount(usdcAta, usdcAccount);
+            svm.setAccount(usdcAta, usdcAccount);
         }
 
         const results = [];
@@ -217,7 +204,7 @@ export async function simulate(
         for (const market of SOLFI_MARKETS) {
             try {
                 const toAta = getAssociatedTokenAddressSync(toMint, user);
-                const balanceBefore = await getTokenBalance(context, toAta);
+                const balanceBefore = getTokenBalance(svm, toAta);
 
                 // Create transaction instructions
                 const instructions = [
@@ -249,15 +236,15 @@ export async function simulate(
 
                 // Create and send transaction
                 const transaction = new Transaction().add(...instructions);
-                transaction.recentBlockhash = context.lastBlockhash;
+                transaction.recentBlockhash = svm.latestBlockhash;
                 transaction.feePayer = user;
                 transaction.sign(userKeypair);
 
                 // Simulate transaction execution
-                await context.banksClient.processTransaction(transaction);
+                svm.sendTransaction(transaction);
 
                 // Get balance after transaction
-                const balanceAfter = await getTokenBalance(context, toAta);
+                const balanceAfter = getTokenBalance(svm, toAta);
                 const outAmountAtomic = Number(balanceAfter - balanceBefore);
                 const outAmountUi = outAmountAtomic / Math.pow(10, toDecimals);
 

@@ -4,7 +4,7 @@ A minimal Node.js port of the Rust SolFi simulator that uses a local Solana Virt
 
 ## Features
 
-- **Local SVM Simulation**: Uses `solana-bankrun` (Node.js equivalent of LiteSVM) for local transaction simulation
+- **Local SVM Simulation**: Uses `litesvm` (JavaScript port of LiteSVM) for local transaction simulation
 - **Real Transaction Execution**: Actually executes swap transactions in a simulated environment
 - **Multiple Markets**: Simulates across all 4 SolFi WSOL/USDC markets
 - **Bidirectional Swaps**: Supports both SOL→USDC and USDC→SOL swaps
@@ -21,7 +21,7 @@ npm install
 - `@solana/web3.js` - Solana JavaScript SDK
 - `@solana/spl-token` - SPL Token utilities
 - `@solana/spl-associated-token-account` - Associated token account utilities
-- `solana-bankrun` - Local Solana Virtual Machine for testing
+- `litesvm` - JavaScript port of LiteSVM for local Solana Virtual Machine simulation
 
 ## Usage
 
@@ -90,7 +90,7 @@ Account JSON files should have the format:
 
 ## How It Works
 
-1. **SVM Setup**: Creates a local Solana Virtual Machine using `solana-bankrun`
+1. **SVM Setup**: Creates a local Solana Virtual Machine using `litesvm`
 2. **Program Loading**: Loads the SolFi program from `data/solfi.so`
 3. **Account Loading**: Loads all account states from JSON files in `data/`
 4. **User Setup**: Creates a user keypair and funds it appropriately
@@ -102,7 +102,7 @@ Account JSON files should have the format:
 
 ## Key Differences from Rust Version
 
-- Uses `solana-bankrun` instead of `LiteSVM`
+- Uses `litesvm` (JavaScript port of LiteSVM)
 - JavaScript/Node.js instead of Rust
 - Async/await pattern for all operations
 - JSON file loading instead of Rust serialization
